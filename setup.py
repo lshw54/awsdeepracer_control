@@ -9,7 +9,7 @@ setuptools.setup(
     name="awsdeepracer_control",
     license="MIT",
     description="awsdeepracer_control is a rewrite python package for control the DeepRacer vehicle via HTTP API.",
-    version="0.1.0",
+    version="0.1.2",
     long_description=README,
     long_description_content_type="text/markdown",
     url="https://github.com/lshw54/awsdeepracer_control",
