@@ -163,7 +163,7 @@ class Client:
             self.URL + url, json=data, headers=self.headers, verify=False
         )
         if check_success:
-            if response.status_code != 200 or response.text.find('"success":true') < 0:
+            if response.status_code != 200 or response.text.find('"success":true') != -1:
                 raise DeepracerVehicleApiError(
                     "Put action failed with body text {}".format(response.text)
                 )
@@ -204,7 +204,7 @@ class Client:
         self.headers = {
             "X-CSRFToken": self.csrf_token,
             "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.100 Safari/537.36",
-            "referer": self.URL + "/home",
+            "referer": self.URL + "home",
             "origin": self.URL,
             "accept-encoding": "gzip, deflate, br",
             "content-type": "application/json;charset=UTF-8",
