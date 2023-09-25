@@ -1,8 +1,6 @@
 import sys
 import json
 import logging
-import time
-
 import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 from bs4 import BeautifulSoup
@@ -18,6 +16,8 @@ class DeepracerVehicleApiError(Exception):
 
 # Class that interfaces with thea web page to control the DeepRacer, load models, and receive camera data
 class Client:
+    BASE_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+
     def __init__(self, password, ip="127.0.0.1", name="deepracer"):
         logging.info("Create client with ip = %s", ip)
         self.session = requests.Session()
@@ -26,46 +26,40 @@ class Client:
         self.name = name
         self.ip = ip
         self.headers = None
-
-        # basic URLs that are needed for logging on and retrieving data
-        self.URL = (
-            "https://" + self.ip + "/"
-        )  # Main URL for logging onto DeepRacer web page for first time
-
-        # state variables
-        self.manual = True
-        self.start = False
+        self.URL = f"https://{self.ip}/"
         self.csrf_token = None
 
-    # High level test methods
-
     def show_vehicle_info(self):
-        print("")
-        print("USB is connected status :", self.get_is_usb_connected())
-        print("Vehicle battery level   :", self.get_battery_level())
-
-        self.set_calibration_mode()
-        print("Angle settings          :", self.get_calibration_angle())
-        print("Throttle settings       :", self.get_calibration_throttle())
-
-        print("Models are              :", json.dumps(self.get_models(), indent=2))
-
-    # General purpose methods
+        """Display vehicle information."""
+        info = {
+            "USB connection": self.get_is_usb_connected(),
+            "Battery level": self.get_battery_status(),
+            "Angle settings": self.get_calibration_angle(),
+            "Throttle settings": self.get_calibration_throttle(),
+            "Models": self.get_models(),
+            "Network details": self.get_network_details()
+        }
+        for key, value in info.items():
+            print(f"{key}: {value}")
 
     def get_is_usb_connected(self):
         return self._get("api/is_usb_connected")
 
-    def get_battery_level(self):
-        return self._get("api/get_battery_level")
+    def get_battery_status(self):
+        level = self._get("api/get_battery_level")["battery_level"]
+        battery_messages = {
+            10: "Full charge",
+            -1: "Vehicle battery not connected"
+        }
+        return battery_messages.get(level, f"Battery level: {level}")
+
+    def get_network_details(self):
+        return self._get("api/get_network_details")
 
     def get_raw_video_stream(self):
         self._get_csrf_token()
-        # Get the video stream
-        video_url = self.URL + "/route?topic=/display_mjpeg&width=480&height=360"
-
-        return self.session.get(
-            video_url, headers=self.headers, stream=True, verify=False
-        )
+        video_url = f"{self.URL}/route?topic=/camera_pkg/display_mjpeg&width=1920&height=1080"
+        return self.session.get(video_url, headers=self.headers, stream=True, verify=False)
 
     #  methods for running autonomous mode
 
@@ -108,7 +102,7 @@ class Client:
 
     def load_model(self, model_name):
         model_url = "api/models/" + model_name + "/model"
-        return self._put(model_url, null)
+        return self._put(model_url, None)
 
     def upload_model(self, model_zip_path, model_name):
         model_file = open(model_zip_path, "rb")
@@ -146,65 +140,74 @@ class Client:
     # helper methods
 
     def _get(self, url, check_status_code=True):
-        self._get_csrf_token()
-        logging.debug("> Get %s", url)
-        response = self.session.get(self.URL + url, headers=self.headers, verify=False)
-        if check_status_code:
-            if response.status_code != 200:
-                raise DeepracerVehicleApiError(
-                    "Get action failed with status code {}".format(response.status_code)
-                )
-        return json.loads(response.text)
+        try:
+            self._get_csrf_token()
+            logging.debug("> Get %s", url)
+            response = self.session.get(self.URL + url, headers=self.headers, verify=False)
+            if check_status_code:
+                if response.status_code != 200:
+                    raise DeepracerVehicleApiError(
+                        f"Get action failed with status code {response.status_code}"
+                    )
+            return json.loads(response.text)
+        except requests.RequestException as e:
+            raise DeepracerVehicleApiError(f"Failed to make GET request due to: {str(e)}")
 
     def _put(self, url, data, check_success=True):
-        self._get_csrf_token()
-        logging.debug("> Put %s with %s", url, data)
-        response = self.session.put(
-            self.URL + url, json=data, headers=self.headers, verify=False
-        )
-        if check_success:
-            if response.status_code != 200 or response.text.find('"success":true') != -1:
-                raise DeepracerVehicleApiError(
-                    "Put action failed with body text {}".format(response.text)
-                )
-        return json.loads(response.text)
+        try:
+            self._get_csrf_token()
+            logging.debug("> Put %s with %s", url, data)
+            response = self.session.put(
+                self.URL + url, json=data, headers=self.headers, verify=False
+            )
+            response_json = json.loads(response.text)
+            if check_success:
+                if response.status_code != 200 or not response_json.get("success", False):
+                    raise DeepracerVehicleApiError(
+                        f"Put action failed with body text {response.text}"
+                    )
+            return response_json
+        except requests.RequestException as e:
+            raise DeepracerVehicleApiError(f"Failed to make PUT request due to: {str(e)}")
 
     def _get_csrf_token(self):
+        """Fetch CSRF token."""
         if self.csrf_token:
             return
 
-        # Get the CSRF Token and logon on to a DeepRacer control interface session
+        response = self._get_initial_page_response()
+        self.csrf_token = self._extract_csrf_token(response.text)
+        self._perform_login()
+
+    def _get_initial_page_response(self):
+        """Get initial DeepRacer page response."""
         try:
-            response = self.session.get(
-                self.URL, verify=False, timeout=10
-            )  # Cannot verify with Deep Racer
+            return self.session.get(self.URL, verify=False, timeout=10)
         except requests.exceptions.ConnectTimeout:
-            raise DeepracerVehicleApiError(
-                "The vehicle with URL '{}' did not respond".format(self.URL)
-            )
-        # The hack to find the csrf token
-        soup = BeautifulSoup(response.text, "lxml")
-        self.csrf_token = soup.select_one('meta[name="csrf-token"]')["content"]
-        # primary header to login
-        self.headers = {
+            raise DeepracerVehicleApiError(f"The vehicle with URL '{self.URL}' did not respond")
+
+    @staticmethod
+    def _extract_csrf_token(page_content):
+        """Extract CSRF token from page content."""
+        soup = BeautifulSoup(page_content, "lxml")
+        return soup.select_one('meta[name="csrf-token"]')["content"]
+
+    def _perform_login(self):
+        """Login to DeepRacer control interface."""
+        primary_headers = {
             "X-CSRFToken": self.csrf_token,
-            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.100 Safari/537.36",
+            "user-agent": self.BASE_USER_AGENT
         }
         payload = {"password": self.password}
-        login_url = self.URL + "/login"
-        post = self.session.post(
-            login_url, data=payload, headers=self.headers, verify=False
-        )
+        login_url = f"{self.URL}/login"
+        post = self.session.post(login_url, data=payload, headers=primary_headers, verify=False)
         if post.status_code != 200:
-            raise DeepracerVehicleApiError(
-                "Log in failed. Error message {}".format(post.text)
-            )
+            raise DeepracerVehicleApiError(f"Log in failed. Error message {post.text}")
 
-        # secondary header for other commands
         self.headers = {
             "X-CSRFToken": self.csrf_token,
-            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.100 Safari/537.36",
-            "referer": self.URL + "home",
+            "user-agent": self.BASE_USER_AGENT,
+            "referer": f"{self.URL}home",
             "origin": self.URL,
             "accept-encoding": "gzip, deflate, br",
             "content-type": "application/json;charset=UTF-8",
